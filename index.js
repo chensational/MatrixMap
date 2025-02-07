@@ -1,5 +1,253 @@
 // MatrixMap.js
 
+/**
+ * Creates a MatrixMap—a plain Array decorated with key–indexing capabilities.
+ *
+ * @param {Array} [initialElements=[]] - Initial elements for the MatrixMap.
+ * @param {Object} [options={}] - Options for configuration.
+ * @param {string} [options.keyField='_id'] - The property name used as the key.
+ * @returns {Array} A plain array with additional MatrixMap functionality.
+ */
+function createMatrixMap(initialElements = [], options = {}) {
+  const keyField = options.keyField || '_id';
+  // Create a plain array from the initial elements.
+  const arr = Array.from(initialElements);
+
+  // Attach a hidden property for the key map.
+  Object.defineProperty(arr, '_keyMap', {
+    value: new Map(),
+    writable: true,
+    enumerable: false,
+    configurable: false,
+  });
+
+  // Attach a hidden property for the key field.
+  Object.defineProperty(arr, '_keyField', {
+    value: keyField,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+
+  // Build the initial key map.
+  arr.forEach(item => {
+    if (item && item[keyField] !== undefined) {
+      arr._keyMap.set(item[keyField], item);
+    }
+  });
+
+  // Define extra (non-enumerable) methods on the array.
+  Object.defineProperties(arr, {
+    /**
+     * Returns the element corresponding to the given key.
+     *
+     * @param {*} key - The key value.
+     * @returns {*} The matching element or undefined.
+     */
+    getByKey: {
+      value: function(key) {
+        return this._keyMap.get(key);
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Updates the element with the given key.
+     *
+     * @param {*} key - The key of the element to update.
+     * @param {*} newValue - The new value to set.
+     * @returns {boolean} True if updated; false if no element with the key exists.
+     */
+    updateByKey: {
+      value: function(key, newValue) {
+        const index = this.findIndex(item => item && item[this._keyField] === key);
+        if (index !== -1) {
+          const oldItem = this[index];
+          if (oldItem && oldItem[this._keyField] !== undefined) {
+            this._keyMap.delete(oldItem[this._keyField]);
+          }
+          this[index] = newValue;
+          if (newValue && newValue[this._keyField] !== undefined) {
+            this._keyMap.set(newValue[this._keyField], newValue);
+          }
+          return true;
+        }
+        return false;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override push so that new items are added to the key map.
+     */
+    push: {
+      value: function(...items) {
+        const result = Array.prototype.push.apply(this, items);
+        items.forEach(item => {
+          if (item && item[this._keyField] !== undefined) {
+            this._keyMap.set(item[this._keyField], item);
+          }
+        });
+        return result;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override pop so that removed items are deleted from the key map.
+     */
+    pop: {
+      value: function() {
+        const item = Array.prototype.pop.call(this);
+        if (item && item[this._keyField] !== undefined) {
+          this._keyMap.delete(item[this._keyField]);
+        }
+        return item;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override shift so that the key map is updated.
+     */
+    shift: {
+      value: function() {
+        const item = Array.prototype.shift.call(this);
+        if (item && item[this._keyField] !== undefined) {
+          this._keyMap.delete(item[this._keyField]);
+        }
+        return item;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override unshift so that new items are added to the key map.
+     */
+    unshift: {
+      value: function(...items) {
+        const result = Array.prototype.unshift.apply(this, items);
+        items.forEach(item => {
+          if (item && item[this._keyField] !== undefined) {
+            this._keyMap.set(item[this._keyField], item);
+          }
+        });
+        return result;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override splice so that both removal and insertion update the key map.
+     */
+    splice: {
+      value: function(start, deleteCount, ...items) {
+        const removed = Array.prototype.splice.apply(this, [start, deleteCount, ...items]);
+        // Remove keys for removed items.
+        removed.forEach(item => {
+          if (item && item[this._keyField] !== undefined) {
+            this._keyMap.delete(item[this._keyField]);
+          }
+        });
+        // Add keys for inserted items.
+        items.forEach(item => {
+          if (item && item[this._keyField] !== undefined) {
+            this._keyMap.set(item[this._keyField], item);
+          }
+        });
+        return removed;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override fill so that affected indices update the key map.
+     */
+    fill: {
+      value: function(value, start = 0, end = this.length) {
+        const len = this.length;
+        start = (start < 0) ? Math.max(len + start, 0) : Math.min(start, len);
+        end = (end < 0) ? Math.max(len + end, 0) : Math.min(end, len);
+        for (let i = start; i < end; i++) {
+          const oldItem = this[i];
+          if (oldItem && oldItem[this._keyField] !== undefined) {
+            this._keyMap.delete(oldItem[this._keyField]);
+          }
+          this[i] = value;
+          if (value && value[this._keyField] !== undefined) {
+            this._keyMap.set(value[this._keyField], value);
+          }
+        }
+        return this;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override copyWithin so that the key map is rebuilt after the operation.
+     */
+    copyWithin: {
+      value: function(target, start, end) {        
+        
+        const len = this.length;      
+        let to = target < 0 ? Math.max(len + target, 0) : Math.min(target, len);
+        let from = start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
+        let final = end < 0 ? Math.max(len + end, 0) : Math.min(end, len);
+        const count = Math.min(final - from, len - to);
+        
+        // Delete keys for items that will be overwritten
+        for (let i = to; i < to + count; i++) {
+          const item = this[i];
+          if (item && item[this._keyField] !== undefined) {
+            this._keyMap.delete(item[this._keyField]);
+          }
+        }
+
+        // Perform copyWithin in bulk
+        const oldBulk = this.__bulkUpdate;
+        this.__bulkUpdate = true;
+        Array.prototype.copyWithin.call(this, target, start, end);
+        this.__bulkUpdate = oldBulk;  
+
+        // Update keyMap with new items
+        for (let i = to; i < to + count; i++) {
+          const newItem = this[i];
+          if (newItem && (newItem[this._keyField] !== undefined)) {
+            this._keyMap.set(newItem[this._keyField], newItem);
+          }
+        }
+
+        return this;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override sort so that the key map is rebuilt after sorting.
+     */
+    sort: {
+      value: function(compareFn) {
+        Array.prototype.sort.call(this, compareFn);
+        return this;
+      },
+      enumerable: false,
+    },
+
+    /**
+     * Override reverse so that the key map remains consistent.
+     */
+    reverse: {
+      value: function() {
+        Array.prototype.reverse.call(this);
+        return this;
+      },
+      enumerable: false,
+    },
+  });
+
+  return arr;
+}
+
 class MatrixMap extends Array {
   /**
    * Creates a new MatrixMap instance.
@@ -242,4 +490,4 @@ class MatrixMap extends Array {
   }
 }
 
-module.exports = MatrixMap;
+module.exports = { createMatrixMap, MatrixMap };
