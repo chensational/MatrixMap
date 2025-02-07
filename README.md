@@ -12,13 +12,13 @@ A JavaScript class that extends the built-in `Array` class and adds a `keyMap` f
 ## Installation
 
 ```bash
-npm install matrixmap
+npm install @chensational/matrixmap
 ```
 
 ## Usage
 
 ```javascript
-const MatrixMap = require('matrixmap');
+const MatrixMap = require('@chensational/matrixmap');
 
 const map = new MatrixMap([{ id: 1, name: 'foo' }, { id: 2, name: 'bar' }], { keyField: 'id' });
 

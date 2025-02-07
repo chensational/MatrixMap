@@ -1,0 +1,24 @@
+{
+  "name": "@chensational/matrixmap",
+  "version": "1.0.0",
+  "description": "extension of Array with automatic Map index by unique key",
+  "main": "index.js",
+  "scripts": {
+    "test": "\"echo \\\"Error: no test specified\\\" && exit 1\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chensational/MatrixMap.git"
+  },
+  "keywords": [
+    "Array",
+    "Map",
+    "Key"
+  ],
+  "author": "chensational",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/chensational/MatrixMap/issues"
+  },
+  "homepage": "https://github.com/chensational/MatrixMap#readme"
+}
