@@ -33,7 +33,6 @@ console.log(mm.getByKey(1)); // { _id: 1, value: 'a' }
 ### Creating a MatrixMap with a custom key:
 
 ```javascript
-import { createMatrixMap } from '@chensational/matrixmap';
 
 const mm = createMatrixMap([
   { customKey: 'foo', value: 'bar' },
