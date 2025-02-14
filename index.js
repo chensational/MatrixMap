@@ -33,18 +33,46 @@ function createMatrixMap(initialElements = [], options = {}) {
     configurable: false,
   });
 
+  // Attach a hidden property for the index map.
+  Object.defineProperty(arr, 'indexMap', {
+    value: new Map(),
+    writable: true,
+    enumerable: false,
+    configurable: false,
+  });
+
   // Attach a hidden property for the key field.
-  Object.defineProperty(arr, '_keyField', {
+  Object.defineProperty(arr, 'keyField', {
     value: keyField,
     writable: false,
     enumerable: false,
     configurable: false,
   });
 
-  // Build the initial key map.
-  arr.forEach(item => {
-    if (item && item[keyField] !== undefined) {
-      arr.keyMap.set(item[keyField], item);
+  // Internal helper to rebuild both maps from scratch.
+  Object.defineProperty(arr, 'rebuildKeyMaps', {
+    value: function (idx = 0) {
+      this.keyMap.clear();
+      this.indexMap.clear();
+      for (let i = idx; i < this.length; i++) {
+        const item = this[i];
+        if (item?.[this?.keyField] !== undefined) {
+          const key = item[this.keyField];
+          this.keyMap.set(key, item);
+          this.indexMap.set(key, idx);
+          idx++;
+        }
+      }
+    },
+    enumerable: false,
+  });
+  // Build the initial key map and index map.]
+  let idx = 0;
+  arr.forEach((item, index) => {
+    if ((!arr?.indexMap?.has(item?.[arr?.keyField])) && item[arr?.keyField] !== undefined) {
+      arr.keyMap.set(item[arr?.keyField], item);
+      arr.indexMap.set(item[arr?.keyField], idx);
+      idx++;
     }
   });
 
@@ -72,42 +100,53 @@ function createMatrixMap(initialElements = [], options = {}) {
      */
     updateByKey: {
       value: function(key, newValue) {
-        console.log('updateByKey: ', { key, newValue });
-        if (!newValue || newValue[this._keyField] === undefined) {
+
+        if (!newValue?.[this?.keyField]) {
           return false;
         }
 
-        const index = this.findIndex(item => item?.[this._keyField] === key);
-        console.log('index: ', index);
-
-        if (index === -1) {
-          this.push(newValue);
-          return false;
+        const index = this.indexMap.get(key);
+        
+        if (!index) {
+          arr.push(newValue);
+          this.indexMap.set(item[arr?.keyField], arr?.length - 1);
+          return true;
         }
 
-        // The proxy's set trap will handle updating the keyMap
-        this[index] = newValue;
+        arr[index] = newValue;
+        this.keyMap.set(key, newValue);
+        this.indexMap.set(key, index);
         return true;
       },
       enumerable: false,
     },
 
     /**
-     * Override push so that new items are added to the key map.
+     * Override push so that new items are added to the key map and index map.
      */
     push: {
       value: function(...items) {
-        console.log('push');
         const startIndex = this.length;
+        let idx = startIndex;
         items.forEach((item, i) => {
-          Object.defineProperty(this, startIndex + i, {
-            value: item,
-            writable: true,
-            enumerable: true,
-            configurable: true
-          });
-          if (item && item[this._keyField] !== undefined) {
-            this.keyMap.set(item[this._keyField], item);
+          const key = item?.[this.keyField];
+          const index = this.indexMap.get(key);
+
+          if (!index) {
+            idx++
+            Object.defineProperty(this, startIndex + idx, {
+              value: item,
+              writable: true,
+              enumerable: true,
+              configurable: true
+            });
+            arr[idx] = item;
+            this.keyMap.set(key, item);
+            this.indexMap.set(key, startIndex + idx);
+          } else {
+            arr[index] = item;
+            this.keyMap.set(key, item);
+            this.indexMap.set(key, index);
           }
         });
         return this.length;
@@ -116,89 +155,80 @@ function createMatrixMap(initialElements = [], options = {}) {
     },
 
     /**
-     * Override pop so that removed items are deleted from the key map.
+     * Override pop so that removed items are deleted from the key map and index map.
      */
     pop: {
       value: function() {
         const item = Array.prototype.pop.call(this);
-        if (item && item[this._keyField] !== undefined) {
-          this.keyMap.delete(item[this._keyField]);
-        }
+        const key = item?.[this.keyField];
+        this.keyMap.delete(key);
+        this.indexMap.delete(key);
         return item;
       },
       enumerable: false,
     },
 
     /**
-     * Override shift so that the key map is updated.
+     * Override shift so that the key map and index map are updated.
      */
     shift: {
       value: function() {
+        // does this need to rebuild indexMap???
         const item = Array.prototype.shift.call(this);
-        if (item && item[this._keyField] !== undefined) {
-          this.keyMap.delete(item[this._keyField]);
-        }
+        this.rebuildKeyMaps();
         return item;
       },
       enumerable: false,
     },
 
     /**
-     * Override unshift so that new items are added to the key map.
+     * Override unshift so that new items are added to the key map and index map.
      */
     unshift: {
       value: function(...items) {
         const result = Array.prototype.unshift.apply(this, items);
-        items.forEach(item => {
-          if (item && item[this._keyField] !== undefined) {
-            this.keyMap.set(item[this._keyField], item);
-          }
-        });
+        this.rebuildKeyMaps();
         return result;
       },
       enumerable: false,
     },
 
     /**
-     * Override splice so that both removal and insertion update the key map.
+     * Override splice so that both removal and insertion update the key map and index map.
      */
     splice: {
       value: function(start, deleteCount, ...items) {
         const removed = Array.prototype.splice.apply(this, [start, deleteCount, ...items]);
         // Remove keys for removed items.
+
         removed.forEach(item => {
-          if (item && item[this._keyField] !== undefined) {
-            this.keyMap.delete(item[this._keyField]);
-          }
+          const key = item?.[this?.keyField];
+          this.keyMap?.delete(key);
+          this.indexMap?.delete(key);
         });
         // Add keys for inserted items.
-        items.forEach(item => {
-          if (item && item[this._keyField] !== undefined) {
-            this.keyMap.set(item[this._keyField], item);
-          }
-        });
+        this.rebuildKeyMaps(start);
         return removed;
       },
       enumerable: false,
     },
 
     /**
-     * Override fill so that affected indices update the key map.
+     * Override fill so that affected indices update the key map and index map.
      */
     fill: {
       value: function(value, start = 0, end = this.length) {
         const len = this.length;
         start = (start < 0) ? Math.max(len + start, 0) : Math.min(start, len);
-        end = (end < 0) ? Math.max(len + end, 0) : Math.min(end, len);
+        end = start+1
         for (let i = start; i < end; i++) {
+          const key = item?.[this?.keyField];
           const oldItem = this[i];
-          if (oldItem && oldItem[this._keyField] !== undefined) {
-            this.keyMap.delete(oldItem[this._keyField]);
-          }
-          this[i] = value;
-          if (value && value[this._keyField] !== undefined) {
-            this.keyMap.set(value[this._keyField], value);
-          }
+          this.keyMap?.delete(oldItem?.[key]);
+          this.indexMap?.delete(oldItem?.[key]);
+          arr[i] = value;
+          this.keyMap?.set(key, value);
+          this.indexMap?.set(key, i);
         }
         return this;
       },
@@ -206,7 +236,7 @@ function createMatrixMap(initialElements = [], options = {}) {
     },
 
     /**
-     * Override copyWithin so that the key map is rebuilt after the operation.
+     * Override copyWithin so that the key map and index map are rebuilt after the operation.
      */
     copyWithin: {
       value: function(target, start, end) {
@@ -218,45 +248,46 @@ function createMatrixMap(initialElements = [], options = {}) {
 
         // Delete keys for items that will be overwritten
         for (let i = to; i < to + count; i++) {
+          const key = item?.[this?.keyField];
           const item = this[i];
-          if (item && item[this._keyField] !== undefined) {
-            this.keyMap.delete(item[this._keyField]);
-          }
+          this.keyMap?.delete(key);
+          this.indexMap?.delete(key);
         }
 
         // Perform copyWithin in bulk
         Array.prototype.copyWithin.call(this, target, start, end);
 
-        // Update keyMap with new items
+        // Update keyMap and indexMap with new items
         for (let i = to; i < to + count; i++) {
+          const key = item?.[this?.keyField];
           const newItem = this[i];
-          if (newItem && newItem[this._keyField] !== undefined) {
-            this.keyMap.set(newItem[this._keyField], newItem);
-          }
+          this.keyMap?.set(key, newItem);
+          this.indexMap?.set(key, i);
         }
-
         return this;
       },
       enumerable: false,
     },
 
     /**
-     * Override sort so that the key map is rebuilt after sorting.
+     * Override sort so that the key map and index map are rebuilt after sorting.
      */
     sort: {
       value: function(compareFn) {
         Array.prototype.sort.call(this, compareFn);
+        this.rebuildKeyMaps();
         return this;
       },
       enumerable: false,
     },
 
     /**
-     * Override reverse so that the key map remains consistent.
+     * Override reverse so that the key map and index map remain consistent.
      */
     reverse: {
       value: function() {
         Array.prototype.reverse.call(this);
+        this.rebuildKeyMaps();
         return this;
       },
       enumerable: false,
@@ -266,17 +297,16 @@ function createMatrixMap(initialElements = [], options = {}) {
   // Wrap the array in a Proxy to intercept assignments
   return new Proxy(arr, {
     set: (target, property, value, receiver) => {
-      console.log('proxy set trap: ', property, value?.value?.status);
-      
       if (property === 'length') {
         const newLength = value;
         const oldLength = target.length;
+        
         if (newLength < oldLength) {
           for (let i = newLength; i < oldLength; i++) {
+            const key = item?.[target?.keyField];
+            target.keyMap?.delete(key);
             const item = target[i];
-            if (item && item[target._keyField] !== undefined) {
-              target.keyMap.delete(item[target._keyField]);
-            }
+            target.indexMap?.delete(item?.[key]);
           }
         }
         return Reflect.set(target, property, value, target);
@@ -290,7 +320,6 @@ function createMatrixMap(initialElements = [], options = {}) {
         
         // Try to set directly on the target array first
         const success = Reflect.set(target, property, value, target);
-        console.log('After set - success:', success, 'array[index]:', target[index]?.status?.status, 'matches value?:', target[index] === value);
         
         // If direct set fails, try setting the array value directly
         if (!success) {
@@ -300,24 +329,25 @@ function createMatrixMap(initialElements = [], options = {}) {
         // Get the updated value to ensure it was set
         const currentValue = target[index]; 
         
-        // Update keyMap if the array was successfully updated
-        if (currentValue?.[target._keyField] === value?.[target._keyField]) {
+        // Update keyMap and indexMap if the array was successfully updated
+        if (currentValue?.[target.keyField] === value?.[target.keyField]) {
           // Handle the case where new value is undefined/null (deletion)
           const oldValue = target[index];
-          console.log('oldValue: ',oldValue?.status?.status)
           if (!value) {
-            target.keyMap.delete(oldValue?.[target._keyField]);
+            target.keyMap.delete(oldValue?.[target.keyField]);
+            target.indexMap.delete(oldValue?.[target.keyField]);
             return true;
           }
 
-          const newKey = value[target._keyField];
+          const newKey = value[target.keyField];
           
           // Only proceed if the new value has a valid key
           if (newKey !== undefined) {
-            // Remove old value from keyMap
-            target.keyMap.delete(oldValue?.[target._keyField]);
+            // Remove old value from keyMap and indexMap
+            target.keyMap.delete(oldValue?.[target.keyField]);
+            target.indexMap.delete(oldValue?.[target.keyField]);
             target.keyMap.set(newKey, value);
-            console.log('Updated keyMap - size:', target.keyMap.size, 'has new key:', target.keyMap.has(newKey), value?.status?.status);
+            target.indexMap.set(newKey, index);
           }
           return true;
         }
@@ -333,8 +363,9 @@ function createMatrixMap(initialElements = [], options = {}) {
         const index = Number(property);
         if (index >= 0 && ((index | 0) === index)) {
           const item = target[index];
-          if (item && item[target._keyField] !== undefined) {
-            target.keyMap.delete(item[target._keyField]);
+          if (item && item[target.keyField] !== undefined) {
+            target.keyMap.delete(item[target.keyField]);
+            target.indexMap.delete(item[target.keyField]);
           }
         }
       }
