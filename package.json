@@ -1,6 +1,6 @@
 {
   "name": "@chensational/matrixmap",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "extension of Array with automatic Map index by unique key",
   "main": "index.js",
   "types": "index.d.ts",
