@@ -126,14 +126,17 @@ function createMatrixMap(initialElements = [], options = {}) {
      * Updates the element with the given key.
      *
      * @param {*} key - The key of the element to update.
-     * @param {*} newValue - The new value to set.
+     * @param {*} newValue - The new value to set. Must have the keyField property set.
      * @returns {boolean} True if updated; false if no element with the key exists.
      */
     updateByKey: {
       value: function(key, newValue) {
         if (newValue == null) return this;  // Prevent null/undefined
 
+        // IMPORTANT: newValue must have the keyField property set
+        // If it doesn't, we return without updating
         if (!newValue?.[this?.keyField]) {
+          console.warn(`MatrixMap.updateByKey: newValue missing keyField '${this.keyField}' for key '${key}'`);
           return this;
         }
 
@@ -327,14 +330,16 @@ function createMatrixMap(initialElements = [], options = {}) {
   });
 
   // Wrap the array in a Proxy to intercept assignments
-  return new Proxy(arr, {
+  const matrixMapProxy = new Proxy(arr, {
     set: (target, property, value, receiver) => {
+      console.log('MatrixMap set operation', { property, index: typeof property === 'string' ? Number(property) : property });
       if (value == null) return false;
       
       if (property === 'length') {
         const newLength = value;
         const oldLength = target.length;
         
+        console.log('MatrixMap length change', { oldLength, newLength });
         if (newLength < oldLength) {
           for (let i = newLength; i < oldLength; i++) {
             const item = target[i];
@@ -351,7 +356,7 @@ function createMatrixMap(initialElements = [], options = {}) {
       
       // Handle array index assignments (both string and number types)
       if ((typeof index === 'number') && (index >= 0) && ((index | 0) === index)) {
-        
+        console.log('MatrixMap index set', { index, value: value ? !!value[target.keyField] : value });
         // Try to set directly on the target array first
         const success = Reflect.set(target, property, value, target);
         
@@ -363,49 +368,171 @@ function createMatrixMap(initialElements = [], options = {}) {
         // Get the updated value to ensure it was set
         const currentValue = target[index]; 
         
-        // Update keyMap and indexMap if the array was successfully updated
-        if (currentValue?.[target.keyField] === value?.[target.keyField]) {
-          // Handle the case where new value is undefined/null (deletion)
-          const oldValue = target[index];
-          if (!value) {
-            target.keyMap.delete(oldValue?.[target.keyField]);
-            target.indexMap.delete(oldValue?.[target.keyField]);
-            return true;
-          }
-
-          const newKey = value[target.keyField];
-          
-          // Only proceed if the new value has a valid key
-          if (newKey !== undefined) {
-            // Remove old value from keyMap and indexMap
-            target.keyMap.delete(oldValue?.[target.keyField]);
-            target.indexMap.delete(oldValue?.[target.keyField]);
-            target.keyMap.set(newKey, value);
-            target.indexMap.set(newKey, index);
-          }
-          return true;
+        // Handle keyMap and indexMap updates
+        const oldValue = target[index];
+        const oldKey = oldValue?.[target.keyField];
+        
+        // Remove old key if it exists
+        if (oldKey !== undefined) {
+          console.log('MatrixMap removing old key', { oldKey });
+          target.keyMap.delete(oldKey);
+          target.indexMap.delete(oldKey);
         }
         
-        return false;
+        // Add new key if value exists and has keyField
+        if (value && value[target.keyField] !== undefined) {
+          const newKey = value[target.keyField];
+          console.log('MatrixMap adding new key', { newKey, index });
+          target.keyMap.set(newKey, value);
+          target.indexMap.set(newKey, index);
+        }
+        
+        return true;
       }
 
       // For non-index properties, just set the value
       return Reflect.set(target, property, value, receiver);
     },
     deleteProperty: (target, property) => {
+      console.log('MatrixMap delete operation', { property });
       if (typeof property === 'string') {
         const index = Number(property);
         if (index >= 0 && ((index | 0) === index)) {
           const item = target[index];
           if (item && item[target.keyField] !== undefined) {
-            target.keyMap.delete(item[target.keyField]);
-            target.indexMap.delete(item[target.keyField]);
+            const key = item[target.keyField];
+            console.log('MatrixMap deleting key', { key });
+            target.keyMap.delete(key);
+            target.indexMap.delete(key);
           }
         }
       }
       return Reflect.deleteProperty(target, property);
     }
   });
+  
+  // Add a method to check if this is a MatrixMap
+  Object.defineProperty(matrixMapProxy, 'isMatrixMap', {
+    value: true,
+    writable: false,
+    enumerable: false,
+    configurable: false
+  });
+  
+  // Add a method to convert to a plain array for compatibility
+  // This is O(1) - just returns the underlying array without the Proxy
+  Object.defineProperty(matrixMapProxy, 'toArray', {
+    value: function() {
+      return arr;
+    },
+    writable: false,
+    enumerable: false,
+    configurable: false
+  });
+  
+  // Add a method that returns an array-compatible wrapper
+  // This creates a facade that will pass Array.isArray checks
+  Object.defineProperty(matrixMapProxy, 'asArray', {
+    value: function() {
+      // Return a real array that delegates to this MatrixMap
+      const arrayFacade = new Proxy([], {
+        get(target, prop) {
+          // Handle numeric indices - delegate to MatrixMap
+          if (typeof prop === 'string' && !isNaN(prop)) {
+            const index = parseInt(prop, 10);
+            if (index >= 0 && index < matrixMapProxy.length) {
+              return matrixMapProxy[index];
+            }
+            return undefined;
+          }
+          
+          // Handle length property
+          if (prop === 'length') {
+            return matrixMapProxy.length;
+          }
+          
+          // Handle array methods - delegate to MatrixMap
+          if (typeof Array.prototype[prop] === 'function') {
+            return function(...args) {
+              return Array.prototype[prop].apply(matrixMapProxy, args);
+            };
+          }
+          
+          // Handle MatrixMap's custom methods
+          if (prop === 'getByKey') return matrixMapProxy.getByKey;
+          if (prop === 'updateByKey') return matrixMapProxy.updateByKey;
+          if (prop === 'deleteByKey') return matrixMapProxy.deleteByKey;
+          if (prop === 'isMatrixMap') return true;
+          
+          // Handle Symbol.iterator
+          if (prop === Symbol.iterator) {
+            return function* () {
+              for (let i = 0; i < matrixMapProxy.length; i++) {
+                yield matrixMapProxy[i];
+              }
+            };
+          }
+          
+          return Reflect.get(target, prop);
+        },
+        
+        set(target, prop, value) {
+          // Delegate all sets to the MatrixMap
+          if (typeof prop === 'string' && !isNaN(prop)) {
+            const index = parseInt(prop, 10);
+            if (index >= 0) {
+              matrixMapProxy[index] = value;
+              return true;
+            }
+          }
+          
+          if (prop === 'length') {
+            matrixMapProxy.length = value;
+            return true;
+          }
+          
+          return Reflect.set(target, prop, value);
+        },
+        
+        has(target, prop) {
+          if (typeof prop === 'string' && !isNaN(prop)) {
+            const index = parseInt(prop, 10);
+            return index >= 0 && index < matrixMapProxy.length;
+          }
+          return Reflect.has(target, prop);
+        },
+        
+        ownKeys(target) {
+          const keys = [];
+          for (let i = 0; i < matrixMapProxy.length; i++) {
+            keys.push(String(i));
+          }
+          return keys;
+        },
+        
+        getOwnPropertyDescriptor(target, prop) {
+          if (typeof prop === 'string' && !isNaN(prop)) {
+            const index = parseInt(prop, 10);
+            if (index >= 0 && index < matrixMapProxy.length) {
+              return {
+                configurable: true,
+                enumerable: true,
+                value: matrixMapProxy[index]
+              };
+            }
+          }
+          return Reflect.getOwnPropertyDescriptor(target, prop);
+        }
+      });
+      
+      return arrayFacade;
+    },
+    writable: false,
+    enumerable: false,
+    configurable: false
+  });
+  
+  return matrixMapProxy;
 }
 
 module.exports = { createMatrixMap };
