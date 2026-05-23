@@ -1,537 +1,798 @@
 // MatrixMap.js
 
+const MATRIXMAP_ELEMENT_VERSIONS = Symbol.for('matrixmap.elementVersions');
+const MATRIXMAP_CHANGED_KEYS = Symbol.for('matrixmap.changedKeys');
+
+const normalizeVersionKey = (key) => {
+  if (key === undefined || key === null) return '';
+  return typeof key === 'string' ? key : String(key);
+};
+
+const normalizeAffectedKeys = (keys) => {
+  if (keys === undefined || keys === null) return [];
+  const rawKeys = Array.isArray(keys) || keys instanceof Set ? Array.from(keys) : [keys];
+  const seen = new Set();
+  const normalized = [];
+  rawKeys.forEach((key) => {
+    const normalizedKey = normalizeVersionKey(key);
+    if (!normalizedKey || seen.has(normalizedKey)) return;
+    seen.add(normalizedKey);
+    normalized.push(normalizedKey);
+  });
+  return normalized;
+};
+
+const isPlainObject = (value) =>
+  Boolean(value) && Object.prototype.toString.call(value) === '[object Object]';
+
+const areMatrixMapValuesEqual = (left, right, seen = new WeakMap()) => {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+
+  let rightSeen = seen.get(left);
+  if (rightSeen?.has(right)) return true;
+  if (!rightSeen) {
+    rightSeen = new WeakSet();
+    seen.set(left, rightSeen);
+  }
+  rightSeen.add(right);
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (!areMatrixMapValuesEqual(left[index], right[index], seen)) return false;
+    }
+    return true;
+  }
+
+  if (!isPlainObject(left) || !isPlainObject(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+    if (!areMatrixMapValuesEqual(left[key], right[key], seen)) return false;
+  }
+  return true;
+};
+
+const getItemVersionKey = (item, keyField) => normalizeVersionKey(item?.[keyField]);
+
+const getArrayIndexProperty = (property) => {
+  const index = typeof property === 'string' ? Number(property) : property;
+  return typeof index === 'number' && index >= 0 && Number.isInteger(index) ? index : null;
+};
+
+const isValidKeyedItem = (item, keyField) =>
+  item && typeof item === 'object' && item[keyField] !== undefined && item[keyField] !== null;
+
 /**
- * Creates a MatrixMap—a plain Array decorated with key–indexing capabilities.
+ * Creates a MatrixMap: an Array decorated with O(1) key lookups and optional
+ * version metadata for mutable React/Jotai-style workflows.
  *
- * @param {Array} [initialElements=[]] - Initial elements for the MatrixMap.
+ * @param {Array|Object} [initialElements=[]] - Initial elements for the MatrixMap.
  * @param {Object} [options={}] - Options for configuration.
  * @param {string} [options.keyField='_id'] - The property name used as the key.
- * @returns {Array} A plain array with additional MatrixMap functionality.
+ * @param {boolean} [options.enableVersioning=false] - Enable collection and element versions.
+ * @returns {Array} An array with MatrixMap helpers.
  */
 function createMatrixMap(initialElements = [], options = {}) {
   const keyField = options.keyField || '_id';
-  // Create a plain array from the initial elements.
+  const enableVersioning = Boolean(options.enableVersioning);
+
   const arr = new Proxy([], {
     defineProperty(target, prop, desc) {
-      // Override property descriptor for numeric indices
-      if (!isNaN(parseInt(prop))) {
+      if (typeof prop === 'string' && !Number.isNaN(parseInt(prop, 10))) {
         desc.configurable = true;
         desc.writable = true;
       }
       return Reflect.defineProperty(target, prop, desc);
-    }
+    },
   });
 
-  // Copy elements with proper descriptors
-  initialElements = Array.isArray(initialElements) ? initialElements.filter(Boolean) : [initialElements].filter(Boolean);
+  initialElements = Array.isArray(initialElements)
+    ? initialElements.filter(Boolean)
+    : [initialElements].filter(Boolean);
+  initialElements.forEach((element) => arr.push(element));
 
-  initialElements.forEach(element => arr.push(element));
-
-  // Attach a hidden property for the key map.
-  Object.defineProperty(arr, 'keyMap', {
-    value: new Map(),
-    writable: true,
-    enumerable: false,
-    configurable: false,
+  Object.defineProperties(arr, {
+    keyMap: {
+      value: new Map(),
+      writable: true,
+      enumerable: false,
+      configurable: false,
+    },
+    indexMap: {
+      value: new Map(),
+      writable: true,
+      enumerable: false,
+      configurable: false,
+    },
+    keyField: {
+      value: keyField,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    },
+    isMatrixMap: {
+      value: true,
+      enumerable: false,
+    },
+    __isMatrixMap: {
+      value: true,
+      enumerable: false,
+    },
+    _suspendVersioning: {
+      value: 0,
+      writable: true,
+      enumerable: false,
+      configurable: false,
+    },
+    _withVersionSuppressed: {
+      value: function (callback) {
+        this._suspendVersioning += 1;
+        try {
+          return callback();
+        } finally {
+          this._suspendVersioning = Math.max(0, this._suspendVersioning - 1);
+        }
+      },
+      enumerable: false,
+    },
   });
 
-  // Attach a hidden property for the index map.
-  Object.defineProperty(arr, 'indexMap', {
-    value: new Map(),
-    writable: true,
-    enumerable: false,
-    configurable: false,
-  });
+  if (enableVersioning) {
+    Object.defineProperties(arr, {
+      _version: {
+        value: 0,
+        writable: true,
+        enumerable: false,
+        configurable: false,
+      },
+      _versionedInstances: {
+        value: new Map(),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      },
+      _elementVersions: {
+        value: new Map(),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      },
+      _lastChangedElementKeys: {
+        value: [],
+        writable: true,
+        enumerable: false,
+        configurable: false,
+      },
+      _batchDepth: {
+        value: 0,
+        writable: true,
+        enumerable: false,
+        configurable: false,
+      },
+      _pendingCollectionVersion: {
+        value: false,
+        writable: true,
+        enumerable: false,
+        configurable: false,
+      },
+      _pendingElementVersionKeys: {
+        value: new Set(),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      },
+      _setLastChangedElementKeys: {
+        value: function (keys = []) {
+          this._lastChangedElementKeys = normalizeAffectedKeys(keys);
+        },
+        enumerable: false,
+      },
+      _seedElementVersion: {
+        value: function (key) {
+          const normalizedKey = normalizeVersionKey(key);
+          if (!normalizedKey || this._elementVersions.has(normalizedKey)) return;
+          this._elementVersions.set(normalizedKey, 0);
+        },
+        enumerable: false,
+      },
+      _removeElementVersion: {
+        value: function (key) {
+          const normalizedKey = normalizeVersionKey(key);
+          if (!normalizedKey) return;
+          this._elementVersions.delete(normalizedKey);
+        },
+        enumerable: false,
+      },
+      getElementVersion: {
+        value: function (key) {
+          const normalizedKey = normalizeVersionKey(key);
+          if (!normalizedKey) return 0;
+          return this._elementVersions.get(normalizedKey) || 0;
+        },
+        enumerable: false,
+      },
+      getElementVersions: {
+        value: function () {
+          return new Map(this._elementVersions);
+        },
+        enumerable: false,
+      },
+      getLastChangedElementKeys: {
+        value: function () {
+          return Array.from(this._lastChangedElementKeys || []);
+        },
+        enumerable: false,
+      },
+      incrementElementVersion: {
+        value: function (key) {
+          const normalizedKey = normalizeVersionKey(key);
+          if (!normalizedKey) return 0;
+          const nextVersion = (this._elementVersions.get(normalizedKey) || 0) + 1;
+          this._elementVersions.set(normalizedKey, nextVersion);
+          this._setLastChangedElementKeys([normalizedKey]);
+          return nextVersion;
+        },
+        enumerable: false,
+      },
+      startBatch: {
+        value: function () {
+          this._batchDepth += 1;
+        },
+        enumerable: false,
+      },
+      endBatch: {
+        value: function () {
+          this._batchDepth = Math.max(0, this._batchDepth - 1);
+          if (this._batchDepth === 0) {
+            if (this._pendingCollectionVersion) {
+              this._pendingCollectionVersion = false;
+              this._pendingElementVersionKeys.clear();
+              this.incrementVersion();
+            } else if (this._pendingElementVersionKeys.size > 0) {
+              const keys = Array.from(this._pendingElementVersionKeys);
+              this._pendingElementVersionKeys.clear();
+              this.incrementVersion(keys);
+            }
+          }
+        },
+        enumerable: false,
+      },
+      incrementVersion: {
+        value: function (affectedKeys = null) {
+          const normalizedAffectedKeys = normalizeAffectedKeys(affectedKeys);
+          if (normalizedAffectedKeys.length > 0) {
+            if (this._batchDepth > 0) {
+              normalizedAffectedKeys.forEach((key) => this._pendingElementVersionKeys.add(key));
+              return;
+            }
+            normalizedAffectedKeys.forEach((key) => {
+              const nextVersion = (this._elementVersions.get(key) || 0) + 1;
+              this._elementVersions.set(key, nextVersion);
+            });
+            this._setLastChangedElementKeys(normalizedAffectedKeys);
+            return;
+          }
 
-  // Attach a hidden property for the key field.
-  Object.defineProperty(arr, 'keyField', {
-    value: keyField,
-    writable: false,
-    enumerable: false,
-    configurable: false,
-  });
+          if (this._batchDepth > 0) {
+            this._pendingCollectionVersion = true;
+            return;
+          }
 
-  // Internal helper to rebuild both maps from scratch.
+          this._version += 1;
+          this._setLastChangedElementKeys([]);
+
+          if (this._version % 100 === 0) {
+            const currentVersion = this._version;
+            for (const [version] of this._versionedInstances) {
+              if (version < currentVersion - 10) {
+                this._versionedInstances.delete(version);
+              }
+            }
+          }
+        },
+        enumerable: false,
+      },
+      getVersionedInstance: {
+        value: function () {
+          const currentVersion = this._version;
+          if (this._versionedInstances.has(currentVersion)) {
+            return this._versionedInstances.get(currentVersion);
+          }
+
+          const versionedProxy = new Proxy(this, {
+            get(target, prop) {
+              if (prop === Symbol.for('matrixmap.version')) return currentVersion;
+              if (prop === '__matrixMapVersion') return currentVersion;
+              if (prop === '__matrixMapElementVersions' || prop === '__elementVersions') {
+                return new Map(target._elementVersions || []);
+              }
+              if (prop === '__matrixMapChangedKeys' || prop === '__changedKeys') {
+                return Array.from(target._lastChangedElementKeys || []);
+              }
+              if (prop === MATRIXMAP_ELEMENT_VERSIONS) {
+                return new Map(target._elementVersions || []);
+              }
+              if (prop === MATRIXMAP_CHANGED_KEYS) {
+                return Array.from(target._lastChangedElementKeys || []);
+              }
+              if (prop === '__isVersionedProxy') return true;
+              if (prop === 'isMatrixMap' || prop === '__isMatrixMap') return true;
+              return Reflect.get(target, prop);
+            },
+            set(target, prop, value) {
+              return Reflect.set(target, prop, value);
+            },
+            has(target, prop) {
+              return Reflect.has(target, prop);
+            },
+            ownKeys(target) {
+              return Reflect.ownKeys(target);
+            },
+            getOwnPropertyDescriptor(target, prop) {
+              return Reflect.getOwnPropertyDescriptor(target, prop);
+            },
+            defineProperty(target, prop, descriptor) {
+              return Reflect.defineProperty(target, prop, descriptor);
+            },
+            deleteProperty(target, prop) {
+              return Reflect.deleteProperty(target, prop);
+            },
+          });
+
+          this._versionedInstances.set(currentVersion, versionedProxy);
+          return versionedProxy;
+        },
+        enumerable: false,
+      },
+      batchUpdate: {
+        value: function (updateFn) {
+          this.startBatch();
+          try {
+            updateFn(this);
+          } finally {
+            this.endBatch();
+          }
+        },
+        enumerable: false,
+      },
+    });
+  }
+
   Object.defineProperty(arr, 'rebuildKeyMaps', {
-    value: function (idx = 0) {
+    value: function (_start = 0) {
       this.keyMap.clear();
       this.indexMap.clear();
-      for (let i = idx; i < this.length; i++) {
+      for (let i = 0; i < this.length; i += 1) {
         const item = this[i];
-        if (item?.[this?.keyField] !== undefined) {
+        if (isValidKeyedItem(item, this.keyField)) {
           const key = item[this.keyField];
           this.keyMap.set(key, item);
-          this.indexMap.set(key, idx);
-          idx++;
+          this.indexMap.set(key, i);
+          if (enableVersioning && this._seedElementVersion) {
+            this._seedElementVersion(key);
+          }
         }
       }
     },
     enumerable: false,
   });
-  // Build the initial key map and index map.]
-  let idx = 0;
-  arr.forEach((item, index) => {
-    if ((!arr?.indexMap?.has(item?.[arr?.keyField])) && item[arr?.keyField] !== undefined) {
-      arr.keyMap.set(item[arr?.keyField], item);
-      arr.indexMap.set(item[arr?.keyField], idx);
-      idx++;
-    }
-  });
 
-  // Define array methods
+  arr.rebuildKeyMaps();
+
   Object.defineProperties(arr, {
-    /**
-     * Returns the element corresponding to the given key.k
-     *
-     * @param {*} key - The key value.
-     * @returns {*} The matching element or undefined.
-     */
     getByKey: {
-      value: function(key) {
+      value: function (key) {
         return this.keyMap.get(key);
       },
       enumerable: false,
     },
-
-    /**
-     * Deletes the element with the given key.
-     *
-     * @param {*} key - The key of the element to delete.
-     * @returns {boolean} True if the element was deleted; false if no element with the key exists.
-     */
+    hasKey: {
+      value: function (key) {
+        return this.keyMap.has(key);
+      },
+      enumerable: false,
+    },
+    getIndexByKey: {
+      value: function (key) {
+        return this.indexMap.get(key);
+      },
+      enumerable: false,
+    },
     deleteByKey: {
-      value: function(key) {
-        // Find the index of the element with the given key
+      value: function (key) {
         const index = this.indexMap.get(key);
-        
-        // If the key doesn't exist, return false
-        if (index === undefined) {
-          return false;
-        }
-        
-        // Remove the element from the array using splice
+        if (index === undefined) return false;
         this.splice(index, 1);
-        
-        // The splice method already updates the keyMap and indexMap,
-        // but ensure the key is removed
-        this.keyMap.delete(key);
-        this.indexMap.delete(key);
-        
         return true;
       },
       enumerable: false,
     },
-
-    /**
-     * Updates the element with the given key.
-     *
-     * @param {*} key - The key of the element to update.
-     * @param {*} newValue - The new value to set. Must have the keyField property set.
-     * @returns {boolean} True if updated; false if no element with the key exists.
-     */
     updateByKey: {
-      value: function(key, newValue) {
-        if (newValue == null) return this;  // Prevent null/undefined
-
-        // IMPORTANT: newValue must have the keyField property set
-        // If it doesn't, we return without updating
-        if (!newValue?.[this?.keyField]) {
-          console.warn(`MatrixMap.updateByKey: newValue missing keyField '${this.keyField}' for key '${key}'`);
+      value: function (key, newValue) {
+        if (newValue == null) return this;
+        const valueKey = newValue?.[this?.keyField];
+        if (valueKey === undefined || valueKey === null) {
+          console.warn(
+            `MatrixMap.updateByKey: newValue missing keyField '${this.keyField}' for key '${key}'`
+          );
           return this;
         }
 
-        const index = this.indexMap.get(key);
-        
+        const lookupKey = this.indexMap.has(key) ? key : valueKey;
+        const index = this.indexMap.get(lookupKey);
+
         if (index === undefined) {
           this.push(newValue);
-          this.keyMap.set(key, newValue);
-          this.indexMap.set(key, this.length - 1);
-          return this;
+        } else {
+          const previousValue = this[index];
+          if (previousValue !== newValue && areMatrixMapValuesEqual(previousValue, newValue)) {
+            return this;
+          }
+
+          this._withVersionSuppressed(() => {
+            this[index] = newValue;
+          });
+
+          if (enableVersioning) {
+            if (normalizeVersionKey(lookupKey) !== normalizeVersionKey(valueKey)) {
+              this.incrementVersion();
+            } else {
+              this.incrementVersion([valueKey]);
+            }
+          }
         }
 
-        this[index] = newValue;
-        this.keyMap.set(key, newValue);
-        this.indexMap.set(key, index);
         return this;
       },
       enumerable: false,
     },
-
-    /**
-     * Override push so that new items are added to the key map and index map.
-            
-      Object.defineProperty(this, startIndex + idx, {
-        value: item,
-        writable: true,
-        enumerable: true,
-        configurable: true
-      });
-     */
     push: {
-      value: function(...items) {
-        const validItems = items.filter(item => 
-          item && item[this.keyField] !== undefined
-        );
-    
-        // Push all items at once
+      value: function (...items) {
+        const validItems = items.filter((item) => isValidKeyedItem(item, this.keyField));
         const startIdx = this.length;
-        const result = Array.prototype.push.apply(this, validItems);
-    
-        // Update maps
+        const result = this._withVersionSuppressed(() =>
+          Array.prototype.push.apply(this, validItems)
+        );
+
         validItems.forEach((item, i) => {
           const key = item[this.keyField];
           this.keyMap.set(key, item);
           this.indexMap.set(key, startIdx + i);
+          if (enableVersioning && this._seedElementVersion) {
+            this._seedElementVersion(key);
+          }
         });
-    
+
+        if (enableVersioning && validItems.length > 0) {
+          this.incrementVersion();
+        }
+
         return result;
       },
       enumerable: true,
     },
-
-    /**
-     * Override pop so that removed items are deleted from the key map and index map.
-     */
     pop: {
-      value: function() {
-        const item = Array.prototype.pop.call(this);
-        const key = item?.[this.keyField];
-        this.keyMap.delete(key);
-        this.indexMap.delete(key);
+      value: function () {
+        const item = this._withVersionSuppressed(() => Array.prototype.pop.call(this));
+        if (item) {
+          const key = item?.[this.keyField];
+          this.keyMap.delete(key);
+          this.indexMap.delete(key);
+          if (enableVersioning && this._removeElementVersion) {
+            this._removeElementVersion(key);
+          }
+          if (enableVersioning) {
+            this.incrementVersion();
+          }
+        }
         return item;
       },
       enumerable: false,
     },
-
-    /**
-     * Override shift so that the key map and index map are updated.
-     */
     shift: {
-      value: function() {
-        // does this need to rebuild indexMap???
-        const item = Array.prototype.shift.call(this);
-        this.rebuildKeyMaps();
+      value: function () {
+        const item = this._withVersionSuppressed(() => Array.prototype.shift.call(this));
+        if (item) {
+          if (enableVersioning && this._removeElementVersion) {
+            this._removeElementVersion(item?.[this.keyField]);
+          }
+          this.rebuildKeyMaps();
+          if (enableVersioning) {
+            this.incrementVersion();
+          }
+        }
         return item;
       },
       enumerable: false,
     },
-
-    /**
-     * Override unshift so that new items are added to the key map and index map.
-     */
     unshift: {
-      value: function(...items) {
-        const result = Array.prototype.unshift.apply(this, items);
+      value: function (...items) {
+        const validItems = items.filter((item) => isValidKeyedItem(item, this.keyField));
+        const result = this._withVersionSuppressed(() =>
+          Array.prototype.unshift.apply(this, validItems)
+        );
         this.rebuildKeyMaps();
+        if (enableVersioning && validItems.length > 0) {
+          this.incrementVersion();
+        }
         return result;
       },
       enumerable: false,
     },
-
-    /**
-     * Override splice so that both removal and insertion update the key map and index map.
-     */
     splice: {
-      value: function(start, deleteCount, ...items) {
-        const removed = Array.prototype.splice.apply(this, [start, deleteCount, ...items]);
-        // Remove keys for removed items.
+      value: function (start, deleteCount, ...items) {
+        const validItems = items.filter((item) => isValidKeyedItem(item, this.keyField));
+        const spliceArgs = arguments.length === 1 ? [start] : [start, deleteCount, ...validItems];
+        const removed = this._withVersionSuppressed(() =>
+          Array.prototype.splice.apply(this, spliceArgs)
+        );
 
-        removed.forEach(item => {
+        removed.forEach((item) => {
           const key = item?.[this?.keyField];
           this.keyMap?.delete(key);
           this.indexMap?.delete(key);
+          if (enableVersioning && this._removeElementVersion) {
+            this._removeElementVersion(key);
+          }
         });
-        // Add keys for inserted items.
+
         this.rebuildKeyMaps(start);
+
+        if (enableVersioning && (removed.length > 0 || validItems.length > 0)) {
+          this.incrementVersion();
+        }
+
         return removed;
       },
       enumerable: false,
     },
-
-    /**
-     * Override fill so that affected indices update the key map and index map.
-     */
     fill: {
-      value: function(value, start = 0, end = this.length) {
+      value: function (value, start = 0, end = this.length) {
+        if (!isValidKeyedItem(value, this.keyField)) return this;
         const len = this.length;
-        start = (start < 0) ? Math.max(len + start, 0) : Math.min(start, len);
-        end = start+1
-        for (let i = start; i < end; i++) {
-          const oldItem = this[i];
-          const key = value?.[this.keyField];
-          this.keyMap?.delete(oldItem?.[this.keyField]);
-          this.indexMap?.delete(oldItem?.[this.keyField]);
-          arr[i] = value;
-          this.keyMap?.set(key, value);
-          this.indexMap?.set(key, i);
+        start = start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
+        end = end < 0 ? Math.max(len + end, 0) : Math.min(end, len);
+        if (end < start) end = start;
+
+        let changed = false;
+        this._withVersionSuppressed(() => {
+          for (let i = start; i < end; i += 1) {
+            const oldItem = this[i];
+            const key = value?.[this.keyField];
+            this.keyMap?.delete(oldItem?.[this.keyField]);
+            this.indexMap?.delete(oldItem?.[this.keyField]);
+            if (enableVersioning && this._removeElementVersion) {
+              this._removeElementVersion(oldItem?.[this.keyField]);
+            }
+            Array.prototype.splice.call(this, i, 1, value);
+            this.keyMap?.set(key, value);
+            this.indexMap?.set(key, i);
+            if (enableVersioning && this._seedElementVersion) {
+              this._seedElementVersion(key);
+            }
+            changed = true;
+          }
+        });
+
+        if (enableVersioning && changed) {
+          this.incrementVersion();
         }
+
         return this;
       },
       enumerable: false,
     },
-
-    /**
-     * Override copyWithin so that the key map and index map are rebuilt after the operation.
-     */
     copyWithin: {
-      value: function(target, start, end) {
+      value: function (target, start, end) {
         const len = this.length;
-        let to = target < 0 ? Math.max(len + target, 0) : Math.min(target, len);
-        let from = start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
-        let final = end < 0 ? Math.max(len + end, 0) : Math.min(end, len);
+        const to = target < 0 ? Math.max(len + target, 0) : Math.min(target, len);
+        const from = start < 0 ? Math.max(len + start, 0) : Math.min(start, len);
+        const final = end === undefined ? len : end < 0 ? Math.max(len + end, 0) : Math.min(end, len);
         const count = Math.min(final - from, len - to);
 
-        // Delete keys for items that will be overwritten
-        for (let i = to; i < to + count; i++) {
+        for (let i = to; i < to + count; i += 1) {
           const item = this[i];
           const key = item?.[this.keyField];
           this.keyMap?.delete(key);
           this.indexMap?.delete(key);
+          if (enableVersioning && this._removeElementVersion) {
+            this._removeElementVersion(key);
+          }
         }
 
-        // Perform copyWithin in bulk
-        Array.prototype.copyWithin.call(this, target, start, end);
+        this._withVersionSuppressed(() => Array.prototype.copyWithin.call(this, target, start, end));
 
-        // Update keyMap and indexMap with new items
-        for (let i = to; i < to + count; i++) {
+        for (let i = to; i < to + count; i += 1) {
           const newItem = this[i];
           const key = newItem?.[this.keyField];
           this.keyMap?.set(key, newItem);
           this.indexMap?.set(key, i);
+          if (enableVersioning && this._seedElementVersion) {
+            this._seedElementVersion(key);
+          }
+        }
+
+        if (enableVersioning && count > 0) {
+          this.incrementVersion();
+        }
+
+        return this;
+      },
+      enumerable: false,
+    },
+    sort: {
+      value: function (compareFn) {
+        this._withVersionSuppressed(() => Array.prototype.sort.call(this, compareFn));
+        this.rebuildKeyMaps();
+        if (enableVersioning) {
+          this.incrementVersion();
         }
         return this;
       },
       enumerable: false,
     },
-
-    /**
-     * Override sort so that the key map and index map are rebuilt after sorting.
-     */
-    sort: {
-      value: function(compareFn) {
-        Array.prototype.sort.call(this, compareFn);
+    reverse: {
+      value: function () {
+        this._withVersionSuppressed(() => Array.prototype.reverse.call(this));
         this.rebuildKeyMaps();
+        if (enableVersioning) {
+          this.incrementVersion();
+        }
         return this;
       },
       enumerable: false,
     },
-
-    /**
-     * Override reverse so that the key map and index map remain consistent.
-     */
-    reverse: {
-      value: function() {
-        Array.prototype.reverse.call(this);
-        this.rebuildKeyMaps();
-        return this;
+    map: {
+      value: function (callbackfn, thisArg) {
+        return Array.prototype.map.call(this, callbackfn, thisArg);
+      },
+      enumerable: false,
+    },
+    filter: {
+      value: function (predicate, thisArg) {
+        return Array.prototype.filter.call(this, predicate, thisArg);
+      },
+      enumerable: false,
+    },
+    slice: {
+      value: function (start, end) {
+        return Array.prototype.slice.call(this, start, end);
+      },
+      enumerable: false,
+    },
+    concat: {
+      value: function (...items) {
+        return Array.prototype.concat.apply(this, items);
+      },
+      enumerable: false,
+    },
+    toArray: {
+      value: function () {
+        return Array.from(this);
+      },
+      enumerable: false,
+    },
+    toJSON: {
+      value: function () {
+        return Array.from(this);
       },
       enumerable: false,
     },
   });
 
-  // Wrap the array in a Proxy to intercept assignments
   const matrixMapProxy = new Proxy(arr, {
     set: (target, property, value, receiver) => {
-      console.log('MatrixMap set operation', { property, index: typeof property === 'string' ? Number(property) : property });
-      if (value == null) return false;
-      
+      if (value == null && property !== 'length') return false;
+
       if (property === 'length') {
         const newLength = value;
         const oldLength = target.length;
-        
-        console.log('MatrixMap length change', { oldLength, newLength });
+
         if (newLength < oldLength) {
-          for (let i = newLength; i < oldLength; i++) {
+          for (let i = newLength; i < oldLength; i += 1) {
             const item = target[i];
             const key = item?.[target.keyField];
             target.keyMap?.delete(key);
             target.indexMap?.delete(key);
+            if (enableVersioning && target._removeElementVersion) {
+              target._removeElementVersion(key);
+            }
           }
+          const result = Reflect.set(target, property, value, target);
+          if (enableVersioning && target._suspendVersioning === 0) {
+            target.incrementVersion();
+          }
+          return result;
         }
         return Reflect.set(target, property, value, target);
       }
 
-      // Convert property to numeric index if possible
-      const index = (typeof property === 'string') ? Number(property) : property;
-      
-      // Handle array index assignments (both string and number types)
-      if ((typeof index === 'number') && (index >= 0) && ((index | 0) === index)) {
-        console.log('MatrixMap index set', { index, value: value ? !!value[target.keyField] : value });
-        // Try to set directly on the target array first
-        const success = Reflect.set(target, property, value, target);
-        
-        // If direct set fails, try setting the array value directly
-        if (!success) {
-          target[property] = value;
-        }
-        
-        // Get the updated value to ensure it was set
-        const currentValue = target[index]; 
-        
-        // Handle keyMap and indexMap updates
+      const index = getArrayIndexProperty(property);
+      if (index !== null) {
+        if (!isValidKeyedItem(value, target.keyField)) return true;
+
         const oldValue = target[index];
         const oldKey = oldValue?.[target.keyField];
-        
-        // Remove old key if it exists
+        const newKey = value?.[target.keyField];
+        const oldVersionKey = getItemVersionKey(oldValue, target.keyField);
+        const newVersionKey = getItemVersionKey(value, target.keyField);
+        const isExistingIndex = oldValue !== undefined;
+        const isElementUpdate =
+          isExistingIndex && oldVersionKey && oldVersionKey === newVersionKey;
+        const isEqualElementUpdate =
+          isElementUpdate &&
+          oldValue !== value &&
+          areMatrixMapValuesEqual(oldValue, value);
+
+        if (isEqualElementUpdate) return true;
+
+        const success = Reflect.set(target, property, value, target);
+        if (!success) return false;
+
         if (oldKey !== undefined) {
-          console.log('MatrixMap removing old key', { oldKey });
           target.keyMap.delete(oldKey);
           target.indexMap.delete(oldKey);
         }
-        
-        // Add new key if value exists and has keyField
-        if (value && value[target.keyField] !== undefined) {
-          const newKey = value[target.keyField];
-          console.log('MatrixMap adding new key', { newKey, index });
-          target.keyMap.set(newKey, value);
-          target.indexMap.set(newKey, index);
+        if (enableVersioning && oldVersionKey && oldVersionKey !== newVersionKey) {
+          target._removeElementVersion?.(oldVersionKey);
         }
-        
+
+        target.keyMap.set(newKey, value);
+        target.indexMap.set(newKey, index);
+        if (enableVersioning) {
+          target._seedElementVersion?.(newKey);
+        }
+
+        if (enableVersioning && target._suspendVersioning === 0 && oldValue !== value) {
+          if (isElementUpdate) {
+            target.incrementVersion([newVersionKey]);
+          } else {
+            target.incrementVersion();
+          }
+        }
+
         return true;
       }
 
-      // For non-index properties, just set the value
       return Reflect.set(target, property, value, receiver);
     },
     deleteProperty: (target, property) => {
-      console.log('MatrixMap delete operation', { property });
-      if (typeof property === 'string') {
-        const index = Number(property);
-        if (index >= 0 && ((index | 0) === index)) {
-          const item = target[index];
-          if (item && item[target.keyField] !== undefined) {
-            const key = item[target.keyField];
-            console.log('MatrixMap deleting key', { key });
-            target.keyMap.delete(key);
-            target.indexMap.delete(key);
+      const index = getArrayIndexProperty(property);
+      if (index !== null) {
+        const item = target[index];
+        if (isValidKeyedItem(item, target.keyField)) {
+          const key = item[target.keyField];
+          target.keyMap.delete(key);
+          target.indexMap.delete(key);
+          if (enableVersioning && target._removeElementVersion) {
+            target._removeElementVersion(key);
           }
+
+          const result = Reflect.deleteProperty(target, property);
+          if (enableVersioning && target._suspendVersioning === 0 && result) {
+            target.incrementVersion();
+          }
+          return result;
         }
       }
       return Reflect.deleteProperty(target, property);
-    }
-  });
-  
-  // Add a method to check if this is a MatrixMap
-  Object.defineProperty(matrixMapProxy, 'isMatrixMap', {
-    value: true,
-    writable: false,
-    enumerable: false,
-    configurable: false
-  });
-  
-  // Add a method to convert to a plain array for compatibility
-  // This is O(1) - just returns the underlying array without the Proxy
-  Object.defineProperty(matrixMapProxy, 'toArray', {
-    value: function() {
-      return arr;
     },
-    writable: false,
-    enumerable: false,
-    configurable: false
   });
-  
-  // Add a method that returns an array-compatible wrapper
-  // This creates a facade that will pass Array.isArray checks
+
   Object.defineProperty(matrixMapProxy, 'asArray', {
-    value: function() {
-      // Return a real array that delegates to this MatrixMap
-      const arrayFacade = new Proxy([], {
-        get(target, prop) {
-          // Handle numeric indices - delegate to MatrixMap
-          if (typeof prop === 'string' && !isNaN(prop)) {
-            const index = parseInt(prop, 10);
-            if (index >= 0 && index < matrixMapProxy.length) {
-              return matrixMapProxy[index];
-            }
-            return undefined;
-          }
-          
-          // Handle length property
-          if (prop === 'length') {
-            return matrixMapProxy.length;
-          }
-          
-          // Handle array methods - delegate to MatrixMap
-          if (typeof Array.prototype[prop] === 'function') {
-            return function(...args) {
-              return Array.prototype[prop].apply(matrixMapProxy, args);
-            };
-          }
-          
-          // Handle MatrixMap's custom methods
-          if (prop === 'getByKey') return matrixMapProxy.getByKey;
-          if (prop === 'updateByKey') return matrixMapProxy.updateByKey;
-          if (prop === 'deleteByKey') return matrixMapProxy.deleteByKey;
-          if (prop === 'isMatrixMap') return true;
-          
-          // Handle Symbol.iterator
-          if (prop === Symbol.iterator) {
-            return function* () {
-              for (let i = 0; i < matrixMapProxy.length; i++) {
-                yield matrixMapProxy[i];
-              }
-            };
-          }
-          
-          return Reflect.get(target, prop);
-        },
-        
-        set(target, prop, value) {
-          // Delegate all sets to the MatrixMap
-          if (typeof prop === 'string' && !isNaN(prop)) {
-            const index = parseInt(prop, 10);
-            if (index >= 0) {
-              matrixMapProxy[index] = value;
-              return true;
-            }
-          }
-          
-          if (prop === 'length') {
-            matrixMapProxy.length = value;
-            return true;
-          }
-          
-          return Reflect.set(target, prop, value);
-        },
-        
-        has(target, prop) {
-          if (typeof prop === 'string' && !isNaN(prop)) {
-            const index = parseInt(prop, 10);
-            return index >= 0 && index < matrixMapProxy.length;
-          }
-          return Reflect.has(target, prop);
-        },
-        
-        ownKeys(target) {
-          const keys = [];
-          for (let i = 0; i < matrixMapProxy.length; i++) {
-            keys.push(String(i));
-          }
-          return keys;
-        },
-        
-        getOwnPropertyDescriptor(target, prop) {
-          if (typeof prop === 'string' && !isNaN(prop)) {
-            const index = parseInt(prop, 10);
-            if (index >= 0 && index < matrixMapProxy.length) {
-              return {
-                configurable: true,
-                enumerable: true,
-                value: matrixMapProxy[index]
-              };
-            }
-          }
-          return Reflect.getOwnPropertyDescriptor(target, prop);
-        }
-      });
-      
-      return arrayFacade;
+    value: function () {
+      return Array.from(matrixMapProxy);
     },
     writable: false,
     enumerable: false,
-    configurable: false
+    configurable: false,
   });
-  
+
   return matrixMapProxy;
 }
 

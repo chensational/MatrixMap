@@ -8,6 +8,7 @@ MatrixMap is a JavaScript class that extends the built-in `Array` class, augment
 * Maintains an internal keyMap updated on modifications.
 * Supports custom key fields (defaults to `_id`).
 * Provides fast lookup with the `getByKey` method.
+* Optionally tracks collection and per-element versions for mutable UI state.
 
 ## Installation
 
@@ -64,6 +65,27 @@ Constructor: `new MatrixMap(options, ...items)`
 - `sort(compareFn)`: Sorts the array while preserving the keyMap.
 - `reverse()`: Reverses the array in place while keeping the keyMap updated.
 - `getByKey(key)`: Retrieves an element using its key from the keyMap.
+- `updateByKey(key, value)`: Updates an existing keyed element or inserts it when missing.
+- `getIndexByKey(key)`: Retrieves the current array index for a key.
+- `hasKey(key)`: Checks whether a keyed element exists.
+
+### Optional Versioning
+
+Pass `enableVersioning: true` to track collection-level structural changes and same-key element changes separately.
+
+```javascript
+const mm = createMatrixMap([{ _id: 'a', value: 1 }], { enableVersioning: true });
+const view = mm.getVersionedInstance();
+
+mm.updateByKey('a', { _id: 'a', value: 2 });
+
+console.log(mm.getVersionedInstance() === view); // true: collection shape did not change
+console.log(mm.getElementVersion('a')); // 1
+console.log(mm.getLastChangedElementKeys()); // ['a']
+
+mm.push({ _id: 'b', value: 3 });
+console.log(mm.getVersionedInstance() === view); // false: collection shape changed
+```
 
 ## License
 
