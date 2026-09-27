@@ -232,10 +232,26 @@ function createMatrixMap(initialElements = [], options = {}) {
         value: function (key) {
           const normalizedKey = normalizeVersionKey(key);
           if (!normalizedKey) return 0;
-          const nextVersion = (this._elementVersions.get(normalizedKey) || 0) + 1;
-          this._elementVersions.set(normalizedKey, nextVersion);
-          this._setLastChangedElementKeys([normalizedKey]);
-          return nextVersion;
+          // Same path as updateByKey so subscribers see a new versioned instance.
+          this.incrementVersion([normalizedKey]);
+          return this._elementVersions.get(normalizedKey) || 0;
+        },
+        enumerable: false,
+      },
+      // Advance the collection version that keys versioned instances. Every
+      // mutation must advance it: React and Jotai only observe a new reference.
+      _advanceCollectionVersion: {
+        value: function () {
+          this._version += 1;
+
+          if (this._version % 100 === 0) {
+            const currentVersion = this._version;
+            for (const [version] of this._versionedInstances) {
+              if (version < currentVersion - 10) {
+                this._versionedInstances.delete(version);
+              }
+            }
+          }
         },
         enumerable: false,
       },
@@ -274,6 +290,9 @@ function createMatrixMap(initialElements = [], options = {}) {
               const nextVersion = (this._elementVersions.get(key) || 0) + 1;
               this._elementVersions.set(key, nextVersion);
             });
+            // Element versions and changed keys let consumers skip untouched rows,
+            // but the collection still needs a new reference to notify subscribers.
+            this._advanceCollectionVersion();
             this._setLastChangedElementKeys(normalizedAffectedKeys);
             return;
           }
@@ -283,17 +302,8 @@ function createMatrixMap(initialElements = [], options = {}) {
             return;
           }
 
-          this._version += 1;
+          this._advanceCollectionVersion();
           this._setLastChangedElementKeys([]);
-
-          if (this._version % 100 === 0) {
-            const currentVersion = this._version;
-            for (const [version] of this._versionedInstances) {
-              if (version < currentVersion - 10) {
-                this._versionedInstances.delete(version);
-              }
-            }
-          }
         },
         enumerable: false,
       },
