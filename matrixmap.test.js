@@ -24,7 +24,7 @@ test('supports O(1) keyed lookup and updates indexes after structural changes', 
   assert.equal(matrix.getIndexByKey('b'), 1);
 });
 
-test('updates an existing keyed element without bumping the collection version', () => {
+test('publishes a new versioned instance when an existing keyed element changes', () => {
   const matrix = createMatrixMap(
     [
       { _id: 'a', label: 'Alpha', nested: { count: 1 } },
@@ -36,12 +36,39 @@ test('updates an existing keyed element without bumping the collection version',
 
   matrix.updateByKey('a', { _id: 'a', label: 'Alpha updated', nested: { count: 3 } });
 
+  // React/Jotai only observe a new reference, so every mutation advances the
+  // collection version; element versions still identify which rows changed.
   const viewAfter = matrix.getVersionedInstance();
-  assert.equal(viewAfter, viewBefore);
-  assert.equal(viewAfter.__matrixMapVersion, 0);
+  assert.notEqual(viewAfter, viewBefore);
+  assert.equal(viewAfter.__matrixMapVersion, 1);
+  assert.equal(viewAfter.getByKey('a').label, 'Alpha updated');
   assert.equal(matrix.getElementVersion('a'), 1);
   assert.equal(matrix.getElementVersion('b'), 0);
   assert.deepEqual(matrix.getLastChangedElementKeys(), ['a']);
+});
+
+test('publishes one new versioned instance for a batch of element updates', () => {
+  const matrix = createMatrixMap([{ _id: 'a', value: 1 }, { _id: 'b', value: 1 }], { enableVersioning: true });
+  const viewBefore = matrix.getVersionedInstance();
+
+  matrix.startBatch();
+  matrix.updateByKey('a', { _id: 'a', value: 2 });
+  matrix.updateByKey('b', { _id: 'b', value: 2 });
+  assert.equal(matrix.getVersionedInstance(), viewBefore);
+  matrix.endBatch();
+
+  const viewAfter = matrix.getVersionedInstance();
+  assert.notEqual(viewAfter, viewBefore);
+  assert.equal(matrix.getVersionedInstance(), viewAfter);
+  assert.deepEqual([...matrix.getLastChangedElementKeys()].sort(), ['a', 'b']);
+});
+
+test('incrementElementVersion publishes a new versioned instance', () => {
+  const matrix = createMatrixMap([{ _id: 'a', value: 1 }], { enableVersioning: true });
+  const viewBefore = matrix.getVersionedInstance();
+
+  assert.equal(matrix.incrementElementVersion('a'), 1);
+  assert.notEqual(matrix.getVersionedInstance(), viewBefore);
 });
 
 test('ignores equivalent keyed updates', () => {

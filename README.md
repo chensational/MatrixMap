@@ -71,7 +71,7 @@ Constructor: `new MatrixMap(options, ...items)`
 
 ### Optional Versioning
 
-Pass `enableVersioning: true` to track collection-level structural changes and same-key element changes separately.
+Pass `enableVersioning: true` for React/Jotai-friendly change tracking. Every mutation, including a same-key element update, advances the collection version, so `getVersionedInstance()` returns a new reference that subscribers comparing by identity will observe. Per-element versions and the last changed keys are also recorded, so consumers can skip rows that did not change. Equivalent updates are ignored and keep the same reference; `startBatch()`/`endBatch()` publish one new reference for many changes.
 
 ```javascript
 const mm = createMatrixMap([{ _id: 'a', value: 1 }], { enableVersioning: true });
@@ -79,12 +79,12 @@ const view = mm.getVersionedInstance();
 
 mm.updateByKey('a', { _id: 'a', value: 2 });
 
-console.log(mm.getVersionedInstance() === view); // true: collection shape did not change
+console.log(mm.getVersionedInstance() === view); // false: a row changed
 console.log(mm.getElementVersion('a')); // 1
 console.log(mm.getLastChangedElementKeys()); // ['a']
 
-mm.push({ _id: 'b', value: 3 });
-console.log(mm.getVersionedInstance() === view); // false: collection shape changed
+mm.updateByKey('a', { _id: 'a', value: 2 });
+console.log(mm.getLastChangedElementKeys()); // ['a']: equivalent update, same reference
 ```
 
 ## License
